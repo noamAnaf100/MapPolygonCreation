@@ -1,0 +1,12 @@
+{
+  "name": "@map-wand/shared",
+  "version": "0.1.0",
+  "description": "Request and response types shared by the MapPolygonCreation server and UI.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "types": "./types.ts",
+  "exports": {
+    ".": "./types.ts"
+  }
+}

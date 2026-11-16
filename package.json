@@ -1,0 +1,44 @@
+{
+  "name": "map-polygon-creation",
+  "version": "0.1.0",
+  "description": "Draw map polygons with one click: select roads, buildings and areas from OpenStreetMap or AI on aerial imagery, cut or extend them, and export them as GeoJSON zones (ignore motion / priority alerts).",
+  "keywords": [
+    "map",
+    "polygon",
+    "geojson",
+    "openstreetmap",
+    "maplibre",
+    "sam2",
+    "segmentation",
+    "zones"
+  ],
+  "license": "MIT",
+  "author": "noamAnaf100",
+  "homepage": "https://github.com/noamAnaf100/MapPolygonCreation#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/noamAnaf100/MapPolygonCreation.git"
+  },
+  "bugs": {
+    "url": "https://github.com/noamAnaf100/MapPolygonCreation/issues"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=22.15"
+  },
+  "workspaces": [
+    "shared",
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c blue,green \"npm run dev -w server\" \"npm run dev -w web\"",
+    "dev:server": "npm run dev -w server",
+    "dev:web": "npm run dev -w web",
+    "test": "npm test -w server",
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w web"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.7"
+  }
+}

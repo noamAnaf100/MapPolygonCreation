@@ -1,0 +1,33 @@
+{
+  "port": 8787,
+  "cacheDir": "cache",
+  "userAgent": "MapPolygonCreation/0.1 (+https://github.com/noamAnaf100/MapPolygonCreation)",
+  "map": { "center": [34.7818, 32.0853], "zoom": 17 },
+  "layers": {
+    "ortho": {
+      "name": "Orthophoto",
+      "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+      "max_zoom": 19,
+      "attribution": "Imagery © Esri, Maxar, Earthstar Geographics"
+    },
+    "street": {
+      "name": "Street map",
+      "url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+      "max_zoom": 19,
+      "attribution": "© OpenStreetMap contributors"
+    }
+  },
+  "osm": {
+    "vectorTilesUrl": "https://tiles.openfreemap.org/planet",
+    "vectorTileZoom": 14,
+    "buildingSearchM": 30,
+    "roadHitM": 6,
+    "smallAreaM2": 20000
+  },
+  "sam": {
+    "enabled": true,
+    "model": "onnx-community/sam2.1-hiera-small-ONNX",
+    "dtype": "fp32"
+  },
+  "wand": { "mosaicPx": 1024, "simplifyPx": 1.5 }
+}
