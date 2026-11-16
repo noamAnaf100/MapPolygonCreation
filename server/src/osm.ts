@@ -5,8 +5,9 @@ import * as turf from "@turf/turf";
 import type { Feature, LineString, MultiLineString, MultiPolygon, Polygon, Position } from "geojson";
 import type { BBox } from "@map-wand/shared";
 import { CACHE_DIR, CONFIG } from "./config.ts";
-import { TILE, asPolygonal, lngLatToPx, localFrame, polygonsOf, pxToLngLat } from "./geo.ts";
+import { type LocalFrame, TILE, asPolygonal, lngLatToPx, localFrame, polygonsOf, pxToLngLat } from "./geo.ts";
 import { cachedFetch } from "./tiles.ts";
+import { type Blocked, MAX_GAP_M, carriageways, midline, toLngLat } from "./twin.ts";
 
 export type Tags = Record<string, string | number | boolean>;
 
@@ -36,6 +37,7 @@ export interface OsmHit {
   label: string;
   centerline?: LineString | MultiLineString;
   width?: number;
+  divided?: boolean;
 }
 
 const AREA_LAYERS = new Set(["building", "landuse", "landcover", "park", "water", "aeroway"]);
@@ -59,6 +61,8 @@ const STROKE_JOIN_TOLERANCE_M = 2;
 const STROKE_MAX_TURN_DEG = 40;
 const STROKE_MAX_STEPS = 100;
 const DECODED_CACHE_SIZE = 64;
+const METERS_PER_DEG = 111_000;
+const DIVIDED_LABEL = "both directions";
 
 let tileTemplate: string | null = null;
 
@@ -274,27 +278,86 @@ export function followStroke(start: OsmRoad, roads: OsmRoad[]): OsmRoad[] {
   return chosen;
 }
 
-export function roadPolygon(stroke: OsmRoad[], bound: BBox): { polygon: Polygon | MultiPolygon; centerline: MultiLineString } | null {
-  const lines = stroke.flatMap((r) => clipLines(r.line, bound));
-  if (lines.length === 0) return null;
-  const centerline: MultiLineString = { type: "MultiLineString", coordinates: lines };
-  const buffered = turf.buffer(centerline, stroke[0].width / 2, { units: "meters" });
-  const clipped = buffered && turf.intersect(turf.featureCollection([buffered, turf.bboxPolygon(bound)]));
-  const polygon = asPolygonal(polygonsOf(clipped?.geometry));
-  return polygon ? { polygon, centerline } : null;
+interface ShapedRoad {
+  polygon: Polygon | MultiPolygon;
+  centerline: MultiLineString;
+  width: number;
+  divided: boolean;
 }
 
-function roadHit(road: OsmRoad, data: OsmData, bound: BBox): OsmHit | null {
-  const shaped = roadPolygon(followStroke(road, data.roads), bound);
+const multiLine = (coordinates: Position[][]): MultiLineString => ({ type: "MultiLineString", coordinates });
+
+function clippedUnion(parts: (Feature<Polygon | MultiPolygon> | undefined)[], bound: BBox): Polygon | MultiPolygon | null {
+  const present = parts.filter((p): p is Feature<Polygon | MultiPolygon> => p !== undefined);
+  const merged = present.length > 1 ? turf.union(turf.featureCollection(present)) : present[0];
+  const clipped = merged && turf.intersect(turf.featureCollection([merged, turf.bboxPolygon(bound)]));
+  return asPolygonal(polygonsOf(clipped?.geometry));
+}
+
+export function roadPolygon(stroke: OsmRoad[], bound: BBox): ShapedRoad | null {
+  const lines = stroke.flatMap((r) => clipLines(r.line, bound));
+  if (lines.length === 0) return null;
+  const centerline = multiLine(lines);
+  const polygon = clippedUnion([turf.buffer(centerline, stroke[0].width / 2, { units: "meters" })], bound);
+  return polygon ? { polygon, centerline, width: stroke[0].width, divided: false } : null;
+}
+
+function roadsNear(roads: OsmRoad[], lines: Position[][], meters: number): OsmRoad[] {
+  const [w, s, e, n] = turf.bbox(multiLine(lines));
+  const pad = meters / METERS_PER_DEG;
+  const box: BBox = [w - pad * 2, s - pad, e + pad * 2, n + pad];
+  return roads.filter((r) => bboxesOverlap(turf.bbox(r.line) as BBox, box));
+}
+
+function buildingsNear(areas: OsmArea[], lines: Position[][], meters: number, frame: LocalFrame): Blocked {
+  const [w, s, e, n] = turf.bbox(multiLine(lines));
+  const pad = meters / METERS_PER_DEG;
+  const box: BBox = [w - pad * 2, s - pad, e + pad * 2, n + pad];
+  const buildings = areas.filter((a) => a.tags.building && bboxesOverlap(a.bbox, box));
+  return (p) => {
+    const [lng, lat] = frame.toLngLat(p);
+    return buildings.some((b) =>
+      b.bbox[0] <= lng && lng <= b.bbox[2] && b.bbox[1] <= lat && lat <= b.bbox[3] &&
+      turf.booleanPointInPolygon([lng, lat], b.polygon));
+  };
+}
+
+export function dividedRoadPolygon(stroke: OsmRoad[], data: OsmData, bound: BBox): ShapedRoad | null {
+  const lines = stroke.flatMap((r) => clipLines(r.line, bound));
+  if (lines.length === 0) return null;
+  const frame = localFrame(lines[0][0]);
+  const ways = carriageways(roadsNear(data.roads, lines, MAX_GAP_M), stroke[0].tags.highway, frame);
+  const mid = midline(lines.map((l) => l.map((p) => frame.toLocal(p))), ways, buildingsNear(data.areas, lines, MAX_GAP_M, frame));
+  if (!mid) return null;
+  const carriageway = stroke[0].width;
+  const width = Math.round((mid.gap + carriageway) * 10) / 10;
+  const centerline = multiLine(toLngLat(frame)(mid.lines));
+  const partners = toLngLat(frame)(mid.partners);
+  const polygon = clippedUnion([
+    turf.buffer(centerline, width / 2, { units: "meters" }),
+    turf.buffer(multiLine(lines), carriageway / 2, { units: "meters" }),
+    partners.length > 0 ? turf.buffer(multiLine(partners), carriageway / 2, { units: "meters" }) : undefined,
+  ], bound);
+  return polygon ? { polygon, centerline, width, divided: true } : null;
+}
+
+function shapeRoad(stroke: OsmRoad[], data: OsmData, bound: BBox): OsmHit | null {
+  const shaped = dividedRoadPolygon(stroke, data, bound) ?? roadPolygon(stroke, bound);
   if (!shaped) return null;
+  const tags = stroke[0].tags;
   return {
     kind: "road",
     geometry: shaped.polygon,
-    tags: road.tags,
-    label: areaLabel(road.tags),
+    tags,
+    label: shaped.divided ? `${areaLabel(tags)}, ${DIVIDED_LABEL}` : areaLabel(tags),
     centerline: shaped.centerline,
-    width: road.width,
+    width: shaped.width,
+    ...(shaped.divided ? { divided: true } : {}),
   };
+}
+
+function roadHit(road: OsmRoad, data: OsmData, bound: BBox): OsmHit | null {
+  return shapeRoad(followStroke(road, data.roads), data, bound);
 }
 
 export function findHit(point: Position, data: OsmData, bound: BBox, allowLarge: boolean): OsmHit | null {
@@ -330,10 +393,8 @@ export function roadsCrossing(lasso: Polygon, data: OsmData, bound: BBox): OsmHi
     if (seen.has(road)) continue;
     const stroke = followStroke(road, data.roads);
     stroke.forEach((r) => seen.add(r));
-    const shaped = roadPolygon(stroke, bound);
-    if (shaped) {
-      hits.push({ kind: "road", geometry: shaped.polygon, tags: road.tags, label: areaLabel(road.tags), centerline: shaped.centerline, width: road.width });
-    }
+    const hit = shapeRoad(stroke, data, bound);
+    if (hit) hits.push(hit);
   }
   return hits;
 }

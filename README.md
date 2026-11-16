@@ -33,7 +33,7 @@ that edits the draft, and **Done** (`Enter`) adds it to the list. Until then no 
 
 | Tool | Action | Result |
 |---|---|---|
-| **Wand** (`W`) | 1st click on an object | Starts a draft with **the whole object**: the OSM building footprint or land area, or the whole road followed through junctions within the view. Where the map has nothing, SAM2 outlines what is in the imagery. |
+| **Wand** (`W`) | 1st click on an object | Starts a draft with **the whole object**: the OSM building footprint or land area, or the whole road followed through junctions within the view. A divided road (two one-way carriageways with a median) is selected as **one road, both directions**: both carriageways and the median between them. Where the map has nothing, SAM2 outlines what is in the imagery. |
 | | Later clicks **inside** the draft | **Cut** it at that point, as many times as needed. Roads are cut straight across at the click (within a few pixels of the edge also counts); other shapes perpendicular to the line from the first click. The side of the first click is kept, so a cut on each side keeps the segment between. |
 | | Click **outside** a road draft, on a road | **Extends** it: routes from the selected part to the click along the road network (preferring the same road class) and adds that stretch. Refused when the road does not connect or the route is a detour (over 2.5× the straight distance, or over 3 km). Zoom out to reach past the original view. |
 | | Click **outside** any other draft | Ignored, with a hint to cut inside or press Done. |
@@ -48,7 +48,7 @@ lasso candidates), `Ctrl+Z` undoes the last cut or extension, `Del` deletes the 
 
 Saved zones are drawn grey (ignore) or red (priority alerts). **Export GeoJSON** downloads every polygon in
 the list with `zone_mode` (`ignore` or `alert`), `alert_rate` (priority zones only), for roads `covers` (e.g.
-`["road", "east"]`) and `side_m`, and its source, label,
+`["road", "east"]`), `side_m` and `divided` (both directions), and its source, label,
 area, OSM tags and score.
 
 The source dropdown forces **map data only** (OSM) or **AI on imagery only** (SAM2). The base map switches
@@ -128,6 +128,8 @@ click ─► OSM vector tiles (OpenFreeMap) under the click?
          ├─ building / small area ........ OSM footprint
          ├─ road .......................... follow the straightest same-class continuation through
          │                                  junctions, buffer by the road width, clip to the view
+         │    one-way? opposite one-way of the same class 3-45 m away, alongside, no building
+         │    between ─► divided road: centerline = midline, width = gap + carriageway width
          └─ nothing ─► SAM2 point prompt on the imagery ─► mask ─► polygon
 
 2nd click inside ─► remove a half-disc on the far side of the cut line
@@ -137,9 +139,10 @@ click ─► OSM vector tiles (OpenFreeMap) under the click?
 click outside a road ─► road graph from OSM lines (shared vertices + T-junction snapping)
                     ─► shortest path from the selected centerline to the click
                     ─► buffer by the road width and merge into the selection
+                    (divided roads: route turned into the midline between the carriageways)
 
-road sides ─► centerline clipped to the selected road, pieces turned one way
-           ─► strip from width/2 to width/2 + side on the chosen side(s), joined round bends
+road sides ─► centerline clipped to the selected road, pieces turned one way and joined end to end
+           ─► buffer(width/2 + side) minus buffer(width/2), ends cut square, keep the chosen side(s)
            ─► merged with the road, or with the road removed for "side only"
 
 lasso ─► candidates: OSM areas + crossing roads + building group + SAM2 (box + interior point)
@@ -175,6 +178,7 @@ server/src/
   wand.ts             click and lasso strategies, lasso ranking
   cut.ts              cut-at-point geometry
   extend.ts           extend a road along the road network to a click
+  twin.ts             find the opposite carriageway of a divided road and the midline between them
   cover.ts            road and side strips for a road zone
   osm.ts              vector tile decoding, hit testing, road stroke following
   sam.ts              SAM2 engine with embedding cache
@@ -190,7 +194,8 @@ web/src/mapStyle.ts   MapLibre style and overlay layers
 
 - Road selection is bounded by the current view; click further along the road to extend it.
 - OpenFreeMap vector tiles have no road names, so a road is followed by direction and class, not by name.
-  Dual carriageways are two separate roads.
+  Divided roads are joined only where OSM maps both directions as one-way lines of the same class; where
+  the median is wider than 45 m the two directions stay separate roads.
 - The orthophoto and OSM can be misaligned by a few metres; SAM2 follows the pixels, OSM follows the map.
 - SAM2 on CPU is the slow step; a GPU build of ONNX Runtime or the `tiny` model makes it faster.
 

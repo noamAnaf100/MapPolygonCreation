@@ -30,6 +30,7 @@ function fromHit(hit: OsmHit): WandFeature {
     label: hit.label,
     osm_tags: hit.tags,
     ...(hit.centerline ? { centerline: hit.centerline, width_m: hit.width } : {}),
+    ...(hit.divided ? { divided: true } : {}),
   });
 }
 

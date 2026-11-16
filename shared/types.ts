@@ -29,6 +29,7 @@ export interface WandProps {
   osm_tags?: Record<string, string | number | boolean>;
   centerline?: LineString | MultiLineString;
   width_m?: number;
+  divided?: boolean;
   cuts?: number;
   extensions?: number;
   zone_mode?: ZoneMode;

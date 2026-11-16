@@ -1,7 +1,7 @@
 import * as turf from "@turf/turf";
 import type { Feature, LineString, MultiLineString, Polygon, Position } from "geojson";
 import type { RoadCover, WandFeature } from "@map-wand/shared";
-import { asPolygonal, localFrame, polygonsOf } from "./geo.ts";
+import { type LocalFrame, asPolygonal, localFrame, polygonsOf } from "./geo.ts";
 
 const SAMPLE_M = 1;
 const BISECT_STEPS = 12;
@@ -10,6 +10,8 @@ const CONNECT_M = 1.5;
 const PARALLEL_DOT = 0.5;
 const MIN_SIDE_M = 0.5;
 const MAX_SIDE_M = 200;
+const CAP_MARGIN_M = 1;
+const SEAM_OVERLAP_M = 0.05;
 
 type Vec = [number, number];
 
@@ -147,30 +149,67 @@ function neighbourDirection(p: Vec, own: Vec[], lines: Vec[][], leaving: boolean
   return null;
 }
 
-function sideRings(line: Vec[], lines: Vec[][], sign: 1 | -1, near: number, far: number): Vec[][] {
+function sideOfLine(p: Vec, line: Vec[]): 1 | -1 {
+  let best = { distance: Infinity, cross: 0 };
+  for (let i = 1; i < line.length; i++) {
+    const [a, b] = [line[i - 1], line[i]];
+    const d = unit(a, b);
+    const t = Math.max(0, Math.min(dist(a, b), (p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1]));
+    const distance = dist(p, offset(a, d, t));
+    if (distance < best.distance) best = { distance, cross: d[0] * (p[1] - a[1]) - d[1] * (p[0] - a[0]) };
+  }
+  return best.cross >= 0 ? 1 : -1;
+}
+
+function capBeyond(end: Vec, outward: Vec, reach: number): Vec[] {
+  const n = leftOf(outward);
+  const start = offset(end, outward, SEAM_OVERLAP_M);
+  const ring = [offset(start, n, reach), offset(offset(start, n, reach), outward, reach), offset(offset(start, n, -reach), outward, reach), offset(start, n, -reach)];
+  return [...ring, ring[0]];
+}
+
+function chain(lines: Vec[][]): Vec[][] {
+  const chains = lines.map((line) => [...line]);
+  let joined = true;
+  while (joined) {
+    joined = false;
+    for (let i = 0; i < chains.length && !joined; i++) {
+      const next = chains.findIndex((other, j) => j !== i && dist(chains[i][chains[i].length - 1], other[0]) < CONNECT_M);
+      if (next < 0) continue;
+      chains[i].push(...chains[next].slice(1));
+      chains.splice(next, 1);
+      joined = true;
+    }
+  }
+  return chains;
+}
+
+function sideStrips(line: Vec[], lines: Vec[][], sign: 1 | -1, near: number, far: number, frame: LocalFrame): Feature<Polygon>[] {
+  const toPolygon = (ring: Vec[]): Feature<Polygon> => turf.polygon([ring.map(frame.toLngLat)]);
+  const path = turf.lineString(line.map(frame.toLngLat));
+  const last = line.length - 1;
+  const reach = far + CAP_MARGIN_M;
+  const band = turf.difference(turf.featureCollection([
+    turf.buffer(path, far, { units: "meters" })!,
+    turf.buffer(path, near, { units: "meters" })!,
+    toPolygon(capBeyond(line[0], unit(line[1], line[0]), reach)),
+    toPolygon(capBeyond(line[last], unit(line[last - 1], line[last]), reach)),
+  ]));
+  const pieces = polygonsOf(band?.geometry)
+    .filter((piece) => sideOfLine(frame.toLocal(turf.pointOnFeature(piece).geometry.coordinates), line) === sign)
+    .map((piece) => turf.feature(piece));
+
   const sideOf = (direction: Vec): Vec => {
     const n = leftOf(direction);
     return [n[0] * sign, n[1] * sign];
   };
-  const normals = line.slice(1).map((p, i) => sideOf(unit(line[i], p)));
-  const rings: Vec[][] = normals.map((n, i) => {
-    const [a, b] = [line[i], line[i + 1]];
-    const quad = [offset(a, n, near), offset(b, n, near), offset(b, n, far), offset(a, n, far)];
-    return [...quad, quad[0]];
-  });
-  for (let i = 1; i < line.length - 1; i++) {
-    const ring = sector(line[i], normals[i - 1], normals[i], near, far);
-    if (ring) rings.push(ring);
-  }
-  const last = line.length - 1;
   const arriving = neighbourDirection(line[0], line, lines, false);
   const leaving = neighbourDirection(line[last], line, lines, true);
   const joints = [
-    arriving && sector(line[0], sideOf(arriving), normals[0], near, far),
-    leaving && sector(line[last], normals[last - 1], sideOf(leaving), near, far),
+    arriving && sector(line[0], sideOf(arriving), sideOf(unit(line[0], line[1])), near, far),
+    leaving && sector(line[last], sideOf(unit(line[last - 1], line[last])), sideOf(leaving), near, far),
   ];
-  for (const ring of joints) if (ring) rings.push(ring);
-  return rings;
+  return [...pieces, ...joints.flatMap((ring) => (ring ? [toPolygon(ring)] : []))];
 }
 
 export function coverRoad(feature: WandFeature, cover: RoadCover): CoverOutcome {
@@ -183,13 +222,14 @@ export function coverRoad(feature: WandFeature, cover: RoadCover): CoverOutcome 
   const isInside = (p: Vec) => turf.booleanPointInPolygon(turf.point(frame.toLngLat(p)), shape);
   const pieces = linesOf(centerline).flatMap((line) => clipToShape(line.map(frame.toLocal), isInside));
   if (pieces.length === 0) return { error: "Could not find the selected part of the road." };
-  const { lines, sideNames } = orient(pieces);
+  const oriented = orient(pieces);
+  const lines = chain(oriented.lines);
+  const { sideNames } = oriented;
 
   const near = width_m / 2;
   const sideM = Math.min(MAX_SIDE_M, Math.max(MIN_SIDE_M, cover.side_m));
   const signs: (1 | -1)[] = { none: [], left: [1], right: [-1], both: [1, -1] }[cover.sides] as (1 | -1)[];
-  const toPolygon = (ring: Vec[]): Feature<Polygon> => turf.polygon([ring.map(frame.toLngLat)]);
-  const strips = signs.flatMap((sign) => lines.flatMap((line) => sideRings(line, lines, sign, near, near + sideM))).map(toPolygon);
+  const strips = signs.flatMap((sign) => lines.flatMap((line) => sideStrips(line, lines, sign, near, near + sideM, frame)));
 
   const parts: Feature<Polygon>[] = cover.road ? polygonsOf(feature.geometry).map((p) => turf.feature(p)) : [];
   let merged = parts.length + strips.length > 1 ? turf.union(turf.featureCollection([...parts, ...strips])) : (parts[0] ?? strips[0]);

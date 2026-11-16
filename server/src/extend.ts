@@ -3,6 +3,7 @@ import type { LineString, MultiLineString, Position } from "geojson";
 import type { WandFeature } from "@map-wand/shared";
 import { type LocalFrame, asPolygonal, localFrame, polygonsOf } from "./geo.ts";
 import type { OsmRoad } from "./osm.ts";
+import { carriageways, midline } from "./twin.ts";
 
 const NODE_MERGE_M = 1;
 const JUNCTION_SNAP_M = 2.5;
@@ -234,7 +235,7 @@ function pathLength(points: Vec[]): number {
 }
 
 export function extendRoad(feature: WandFeature, point: Position, roads: OsmRoad[], hitM: number): ExtendOutcome {
-  const { centerline, width_m, osm_tags } = feature.properties;
+  const { centerline, width_m, osm_tags, divided } = feature.properties;
   if (!centerline || !width_m) return { error: "Only roads can be extended." };
 
   const frame = localFrame(point);
@@ -256,22 +257,24 @@ export function extendRoad(feature: WandFeature, point: Position, roads: OsmRoad
   if (turf.booleanPointInPolygon(turf.point(frame.toLngLat(target.point)), feature.geometry)) {
     return { error: "That part of the road is already selected." };
   }
-  const origin = graph.nearest(start, JUNCTION_SNAP_M);
+  const origin = graph.nearest(start, divided ? width_m / 2 : JUNCTION_SNAP_M);
   if (!origin) return { error: "The selected road is not in the map data around here." };
 
-  const from = graph.attach(start, origin);
+  const routeStart = divided ? origin.point : start;
+  const from = graph.attach(routeStart, origin);
   const to = graph.attach(target.point, target);
-  if (origin.segment === target.segment) graph.link(from, to, dist(start, target.point), origin.segment.factor);
+  if (origin.segment === target.segment) graph.link(from, to, dist(routeStart, target.point), origin.segment.factor);
   const path = shortestPath(graph, from, to);
   if (!path) return { error: "This road does not connect to the selection." };
 
   const points = path.map((id) => graph.points[id]);
   const length = pathLength(points);
-  if (length > MAX_EXTENSION_M || length > dist(start, target.point) * MAX_DETOUR_FACTOR + DETOUR_SLACK_M) {
+  if (length > MAX_EXTENSION_M || length > dist(routeStart, target.point) * MAX_DETOUR_FACTOR + DETOUR_SLACK_M) {
     return { error: "That point is not along this road." };
   }
 
-  const extension: LineString = { type: "LineString", coordinates: points.map(frame.toLngLat) };
+  const axis = divided ? (midline([points], carriageways(roads, osm_tags?.highway, frame))?.lines[0] ?? points) : points;
+  const extension: LineString = { type: "LineString", coordinates: axis.map(frame.toLngLat) };
   const buffered = turf.buffer(extension, width_m / 2, { units: "meters" });
   const merged = buffered && turf.union(turf.featureCollection([turf.feature(feature.geometry), buffered]));
   const geometry = asPolygonal(polygonsOf(merged?.geometry));

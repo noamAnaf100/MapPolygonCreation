@@ -123,6 +123,24 @@ describe("coverRoad", () => {
     expect(inside(result, -6, -6)).toBe(false);
   });
 
+  it("keeps a side in one piece across consecutive road pieces", () => {
+    const feature = road(line([-90, 0], [-30, 5], [30, 0], [90, 8]), WIDTH);
+    const centerline: MultiLineString = {
+      type: "MultiLineString",
+      coordinates: [[at(-90, 0), at(-30, 5)], [at(-30, 5), at(30, 0)], [at(30, 0), at(90, 8)]] as Position[][],
+    };
+    const pieces = { ...feature, properties: { ...feature.properties, centerline } };
+    for (const sides of ["left", "right"] as const) {
+      expect(covered(coverRoad(pieces, cover({ road: false, sides }))).geometry.type).toBe("Polygon");
+    }
+  });
+
+  it("keeps a densely sampled side in one piece", () => {
+    const points = Array.from({ length: 60 }, (_, i): [number, number] => [-120 + i * 4, 0.002 * (i * 4 - 120) ** 2 / 10]);
+    const result = covered(coverRoad(road(line(...points), WIDTH), cover({ road: false, sides: "left" })));
+    expect(result.geometry.type).toBe("Polygon");
+  });
+
   it("only covers roads", () => {
     const { centerline, ...rest } = straight().properties;
     expect(coverRoad({ ...straight(), properties: rest }, cover({}))).toEqual({ error: "Only roads have sides to cover." });
